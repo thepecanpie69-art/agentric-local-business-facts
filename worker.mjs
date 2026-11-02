@@ -61,6 +61,7 @@ export async function fulfill(env,s){
   const key=newKey();const rec={key,credits,session:s.id,email:s.customer_details?.email||null,livemode:!!s.livemode,created:Date.now()};
   await env.CREDITS.put('key:'+key,JSON.stringify({credits,used:0,session:s.id,created:rec.created}));
   await env.CREDITS.put('sess:'+s.id,JSON.stringify(rec));
+  const day='stat:'+new Date().toISOString().slice(0,10);const st=(await env.CREDITS.get(day,'json'))||{purchases:0,credits_sold:0,subtotal_cents:0};st.purchases++;st.credits_sold+=credits;st.subtotal_cents+=(s.amount_subtotal||0);await env.CREDITS.put(day,JSON.stringify(st));
   return rec;
 }
 const hex=b=>[...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('');
