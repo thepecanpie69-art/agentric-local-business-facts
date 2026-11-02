@@ -46,9 +46,23 @@ export const billable=r=>!!(r&&!r.blocked&&!r.error&&r.fields&&(r.fields.name||r
 // ---- credits ----
 const J=(o,s=200,h={})=>new Response(JSON.stringify(o,null,1),{status:s,headers:{'content-type':'application/json','access-control-allow-origin':'*',...h}});
 export function apiKeyOf(req){const k=req.headers.get('x-api-key');if(k)return k.trim();const a=req.headers.get('authorization')||'';const m=a.match(/^Bearer\s+(\S+)/i);return m?m[1]:null;}
-async function getAcct(env,k){if(!k||!/^agf_[a-f0-9]{32}$/.test(k))return null;return await env.CREDITS.get('key:'+k,'json');}
-async function charge(env,k,acct){acct.credits-=1;acct.used=(acct.used||0)+1;acct.last=Date.now();await env.CREDITS.put('key:'+k,JSON.stringify(acct));return acct.credits;}
-function pay402(origin,msg){return J({x402Version:1,error:msg||'payment required',accepts:[],x402_note:'x402 (USDC) settlement is not enabled yet; use prepaid credits.',prepaid:{price:'$10 = 500 lookups',buy:PAY_LINK,after_payment:origin+'/thanks shows your API key',use:'header x-api-key: <key> or Authorization: Bearer <key>'}},402);}
+async function dobj(env,name,body){const st=env.COUNTER.get(env.COUNTER.idFromName(name));return (await st.fetch('https://do/',{method:'POST',body:JSON.stringify(body)})).json();}
+async function getAcct(env,k){if(!k||!/^agf_[a-f0-9]{32}$/.test(k))return null;const a=await env.CREDITS.get('key:'+k,'json');if(!a)return null;if(env.COUNTER){const r=await dobj(env,'key:'+k,{op:'get',init:a.credits});a.credits=r.credits;a.used=r.used;}return a;}
+async function charge(env,k,acct){if(env.COUNTER){const r=await dobj(env,'key:'+k,{op:'dec',init:acct.credits});return r.credits;}acct.credits-=1;acct.used=(acct.used||0)+1;acct.last=Date.now();await env.CREDITS.put('key:'+k,JSON.stringify(acct));return acct.credits;}
+function pay402(origin,msg){return J({error:msg||'payment required',free_trial:'5 free lookups per IP per day without a key (used up)',prepaid:{price:'$10 = 500 lookups',buy:PAY_LINK,after_payment:origin+'/thanks shows your API key',use:'header x-api-key: <key> or Authorization: Bearer <key>'}},402);}
+const TRIAL_PER_DAY=5;
+// Free trial: no key -> up to 5 lookups/IP/UTC day. One KV write per trial request (expires in 2 days).
+export const ipBucket=ip=>ip.includes(':')?ip.split(':').slice(0,3).join(':')+'::/48':ip;
+const TRIAL_GLOBAL_PER_DAY=500;
+export async function trialUse(env,req){const ip=ipBucket(req.headers.get('cf-connecting-ip')||'unknown');const day=new Date().toISOString().slice(0,10);const name='trial:'+day+':'+ip;if(env.COUNTER){const r=await dobj(env,name,{op:'trial',limit:TRIAL_PER_DAY});if(r.left<0)return -1;const g=await dobj(env,'trialglobal:'+day,{op:'trial',limit:TRIAL_GLOBAL_PER_DAY});return g.left<0?-1:r.left;}const n=Number(await env.CREDITS.get(name)||0);if(n>=TRIAL_PER_DAY)return -1;await env.CREDITS.put(name,String(n+1),{expirationTtl:172800});return TRIAL_PER_DAY-n-1;}
+// Durable Object (SQLite-backed, free plan): strongly consistent counters for trial use and key credits.
+export class Counter{constructor(state){this.s=state.storage;}
+  async fetch(req){const b=await req.json();
+    if(b.op==='trial'){const n=(await this.s.get('n'))||0;if(n>=b.limit)return Response.json({left:-1});await this.s.put('n',n+1);if(n===0)await this.s.setAlarm(Date.now()+172800000);return Response.json({left:b.limit-n-1});}
+    let c=await this.s.get('credits');if(c===undefined){c=b.init||0;await this.s.put('credits',c);}let used=(await this.s.get('used'))||0;
+    if(b.op==='dec'&&c>0){c--;used++;await this.s.put({credits:c,used});}
+    return Response.json({credits:c,used});}
+  async alarm(){await this.s.deleteAll();}}
 const newKey=()=>'agf_'+[...crypto.getRandomValues(new Uint8Array(16))].map(b=>b.toString(16).padStart(2,'0')).join('');
 export function creditsFor(s){const sub=s.amount_subtotal??s.amount_total??0;return Math.max(0,Math.floor(sub/PACK_CENTS))*PACK_CREDITS;}
 // Idempotent: one session id -> one key, credited once.
@@ -84,7 +98,8 @@ async function mcp(req,env,origin){
     if(m.method==='initialize')return r({protocolVersion:m.params?.protocolVersion||'2025-03-26',capabilities:{tools:{}},serverInfo:{name:'local-business-facts',version:'0.2.0'}});
     if(m.method==='tools/list')return r({tools:TOOLS});
     if(m.method==='tools/call'){const k=apiKeyOf(req),acct=await getAcct(env,k);
-      if(!acct||acct.credits<=0)return r({isError:true,content:[{type:'text',text:`Payment required: send header x-api-key with prepaid credits. Buy 500 lookups for $10: ${PAY_LINK}`}]});
+      if(!k){const left=await trialUse(env,req);if(left>=0){const a=m.params?.arguments||{};const out=await lookup(a.url,a.country).catch(e=>({error:String(e.message)}));out.free_trial_remaining_today=left;out.buy=PAY_LINK;return r({content:[{type:'text',text:JSON.stringify(out)}]});}}
+      if(!acct||acct.credits<=0)return r({isError:true,content:[{type:'text',text:`Free trial used up for today (5/day). Send header x-api-key with prepaid credits. Buy 500 lookups for $10: ${PAY_LINK}`}]});
       const a=m.params?.arguments||{};const out=await lookup(a.url,a.country).catch(e=>({error:String(e.message)}));
       if(billable(out))out.credits_remaining=await charge(env,k,acct);else out.charged=false;
       return r({content:[{type:'text',text:JSON.stringify(out)}]});}
@@ -100,7 +115,8 @@ export default {async fetch(req,env){
   if(req.method==='OPTIONS')return new Response(null,{headers:{'access-control-allow-origin':'*','access-control-allow-headers':'x-api-key,authorization,content-type,mcp-protocol-version,mcp-session-id','access-control-allow-methods':'GET,POST,OPTIONS'}});
   if(P==='/v1/lookup'){const q=u.searchParams.get('url');if(!q)return J({error:'url required'},400);
     const k=apiKeyOf(req),acct=await getAcct(env,k);
-    if(!acct)return pay402(origin,k?'unknown api key':'payment required');if(acct.credits<=0)return pay402(origin,'no credits left');
+    if(!k){const left=await trialUse(env,req);if(left<0)return pay402(origin,'free trial used up for today');let out;try{out=await lookup(q,u.searchParams.get('country'));}catch(e){return J({error:String(e.message)},502);}out.free_trial_remaining_today=left;out.buy='$10 = 500 lookups: '+PAY_LINK;return J(out);}
+    if(!acct)return pay402(origin,'unknown api key');if(acct.credits<=0)return pay402(origin,'no credits left');
     let out;try{out=await lookup(q,u.searchParams.get('country'));}catch(e){return J({error:String(e.message),charged:false},502);}
     if(billable(out))out.credits_remaining=await charge(env,k,acct);else{out.charged=false;out.credits_remaining=acct.credits;}
     return J(out);}
@@ -120,15 +136,17 @@ export default {async fetch(req,env){
     return page(`<h1>Your API key</h1><p><code style="font-size:1.2em;background:#eee;padding:6px">${esc(rec.key)}</code></p><p><b>${rec.credits}</b> lookups loaded. Save this key now; this page always shows the same key for this purchase.</p><pre>curl "${origin}/v1/lookup?url=https://www.sacher.com" -H "x-api-key: ${esc(rec.key)}"</pre><p>Balance: <code>${origin}/balance</code> with the same header. MCP: POST <code>${origin}/mcp</code>.</p>`);}
   if(P==='/openapi.json')return J(OPENAPI(origin));
   if(P==='/llms.txt')return new Response(LLMS(origin),{headers:{'content-type':'text/plain;charset=utf-8'}});
-  if(P==='/.well-known/mcp.json')return J({name:'local-business-facts',transport:'streamable-http',url:origin+'/mcp',auth:'x-api-key header'});
-  if(P==='/')return page(`<h1>Local Business Facts API</h1><p>Worldwide, any language. Send a business website URL, get source-cited facts as JSON: name, phone (raw + E.164), address, hours, socials, open/closed signal. Each field has its source URL, method and confidence. Business information only, no personal data.</p><p><b>$10 = 500 lookups</b> (2¢ each). Only successful lookups use a credit. <a href="${PAY_LINK}">Buy credits</a>; your key appears right after checkout.</p><pre>curl "${origin}/v1/lookup?url=https://www.sacher.com&country=AT" -H "x-api-key: YOUR_KEY"</pre><p><a href=/openapi.json>OpenAPI</a> · <a href=/llms.txt>llms.txt</a> · MCP: POST ${origin}/mcp (tool lookup_business)</p>`);
+  if(P==='/.well-known/mcp.json')return J({name:'local-business-facts',description:'Source-cited business facts from any website, worldwide.',transport:'streamable-http',url:origin+'/mcp',auth:{type:'api_key',header:'x-api-key',optional_for_trial:true},free_trial:'5 lookups/IP/day',pricing:'$10 per 500 lookups',buy:PAY_LINK,registry:'io.github.thepecanpie69-art/agentric-local-business-facts',tools:TOOLS.map(t=>t.name)});
+  if(P==='/.well-known/ai-plugin.json')return J({schema_version:'v1',name_for_human:'Local Business Facts',name_for_model:'local_business_facts',description_for_human:'Source-cited facts (phone, address, hours, socials) from any business website, worldwide.',description_for_model:'Given a business website URL, returns JSON facts (name, phone raw+E.164, address, hours, socials, open/closed signal), each with source URL and confidence. Coverage is partial: only what the site publishes. 5 free lookups/IP/day, then x-api-key ($10/500).',auth:{type:'none'},api:{type:'openapi',url:origin+'/openapi.json'},logo_url:'https://github.com/thepecanpie69-art.png',contact_email:'',legal_info_url:'https://github.com/thepecanpie69-art/agentric-local-business-facts'});
+  if(P==='/.well-known/agent.json'||P==='/.well-known/agent-card.json')return J({name:'Local Business Facts',description:'Source-cited business facts from any business website URL, worldwide, any language.',url:origin,version:'0.3.0',provider:{organization:'Agentric',url:origin},capabilities:{streaming:false},defaultInputModes:['text/plain'],defaultOutputModes:['application/json'],interfaces:{rest:origin+'/openapi.json',mcp:origin+'/mcp',llms_txt:origin+'/llms.txt'},skills:[{id:'lookup_business',name:'Business facts lookup',description:'URL in, JSON facts out (name, phone, address, hours, socials), each with source URL and confidence.',tags:['local-business','enrichment','e164'],examples:['https://www.sacher.com']}],pricing:{free_trial:'5 lookups/IP/day',paid:'$10 per 500 lookups',buy:PAY_LINK}});
+  if(P==='/')return page(`<h1>Local Business Facts API</h1><p>Worldwide, any language. Send a business website URL, get source-cited facts as JSON: name, phone (raw + E.164), address, hours, socials, open/closed signal. Each field has its source URL, method and confidence. Business information only, no personal data.</p><p><b>$10 = 500 lookups</b> (2¢ each). Try 5 free lookups a day with no key. Only successful paid lookups use a credit. <a href="${PAY_LINK}">Buy credits</a>; your key appears right after checkout.</p><pre>curl "${origin}/v1/lookup?url=https://www.sacher.com&country=AT" -H "x-api-key: YOUR_KEY"</pre><p><a href=/openapi.json>OpenAPI</a> · <a href=/llms.txt>llms.txt</a> · MCP: POST ${origin}/mcp (tool lookup_business)</p>`);
   return J({error:'not found'},404);
 }};
 const LLMS=o=>`# Local Business Facts API (worldwide)
 > Send any business's website URL (any country, any language). Get JSON facts: name, phone (raw + E.164), postal address, opening hours, socials, open/closed signal, page language, country. Each field has source URL, extraction method and confidence. Business info only, no personal data.
 - GET ${o}/v1/lookup?url=<site>&country=<ISO2 optional>  (header x-api-key or Authorization: Bearer)
 - Price: $10 = 500 lookups prepaid: ${PAY_LINK} (key shown after checkout). 1 credit only when facts are found; bot-blocked or failed lookups are free.
-- Without a key: HTTP 402 with purchase info. x402/USDC not enabled yet.
+- Free trial: 5 lookups per IP per day with no key. After that, HTTP 402 with the purchase link.
 - GET ${o}/balance · OpenAPI: ${o}/openapi.json · MCP (streamable HTTP): POST ${o}/mcp, tool lookup_business {url, country?}
 `;
-const OPENAPI=o=>({openapi:'3.1.0',info:{title:'Local Business Facts API',version:'0.2.0',description:'Worldwide, any page language. Business information only; no personal data. $10 = 500 lookups: '+PAY_LINK},servers:[{url:o}],components:{securitySchemes:{apiKey:{type:'apiKey',in:'header',name:'x-api-key'}}},security:[{apiKey:[]}],paths:{'/v1/lookup':{get:{summary:'Source-cited business facts from a URL',parameters:[{name:'url',in:'query',required:true,schema:{type:'string'}},{name:'country',in:'query',schema:{type:'string'},description:'Optional ISO 3166-1 alpha-2'}],responses:{200:{description:'Facts JSON'},402:{description:'Payment required'}}}},'/balance':{get:{summary:'Remaining credits',responses:{200:{description:'ok'}}}}}});
+const OPENAPI=o=>({openapi:'3.1.0',info:{title:'Local Business Facts API',version:'0.2.0',description:'Worldwide, any page language. Business information only; no personal data. $10 = 500 lookups: '+PAY_LINK},servers:[{url:o}],components:{securitySchemes:{apiKey:{type:'apiKey',in:'header',name:'x-api-key'}}},security:[{},{apiKey:[]}],paths:{'/v1/lookup':{get:{summary:'Source-cited business facts from a URL (5 free/IP/day without a key)',parameters:[{name:'url',in:'query',required:true,schema:{type:'string'}},{name:'country',in:'query',schema:{type:'string'},description:'Optional ISO 3166-1 alpha-2'}],responses:{200:{description:'Facts JSON'},402:{description:'Payment required'}}}},'/balance':{get:{summary:'Remaining credits',responses:{200:{description:'ok'}}}}}});
