@@ -1,0 +1,22 @@
+import w,{fulfill,verifyStripeSig,creditsFor,billable,cleanTitle} from './worker.mjs';
+import assert from 'node:assert';import crypto from 'node:crypto';
+const store=new Map();const env={CREDITS:{get:async(k,t)=>{const v=store.get(k);return v==null?null:(t==='json'?JSON.parse(v):v)},put:async(k,v)=>{store.set(k,v)}},STRIPE_WEBHOOK_SECRET:'whsec_test'};
+const s={id:'cs_live_abc123',payment_status:'paid',currency:'usd',amount_subtotal:1000,amount_total:1083,livemode:true,payment_link:'plink_1UXCgNGfxoYz2IOsefapMVxC'};
+const a=await fulfill(env,s),b=await fulfill(env,s);
+assert.equal(a.credits,500);assert.equal(a.key,b.key);assert.ok(b.repeat);
+assert.equal(JSON.parse(store.get('key:'+a.key)).credits,500);
+assert.equal(creditsFor({amount_subtotal:2000}),1000);
+assert.ok((await fulfill(env,{...s,id:'cs_live_x',payment_status:'unpaid'})).error);
+// webhook sig
+const body=JSON.stringify({type:'checkout.session.completed',data:{object:{...s,id:'cs_live_wh1'}}});const t=Math.floor(Date.now()/1000);
+const sig=crypto.createHmac('sha256','whsec_test').update(t+'.'+body).digest('hex');
+assert.ok(await verifyStripeSig(body,`t=${t},v1=${sig}`,'whsec_test'));
+assert.ok(!await verifyStripeSig(body,`t=${t},v1=${'0'.repeat(64)}`,'whsec_test'));
+const call=()=>w.fetch(new Request('https://x/stripe/webhook',{method:'POST',body,headers:{'stripe-signature':`t=${t},v1=${sig}`}}),env).then(r=>r.json());
+const r1=await call(),r2=await call();assert.ok(r1.ok&&!r1.repeat&&r2.repeat);
+const bad=await w.fetch(new Request('https://x/stripe/webhook',{method:'POST',body,headers:{'stripe-signature':`t=${t},v1=bad`}}),env);assert.equal(bad.status,400);
+const th=await (await w.fetch(new Request('https://x/thanks?session_id=cs_live_wh1'),env)).text();const k=JSON.parse(store.get('sess:cs_live_wh1')).key;assert.ok(th.includes(k));
+assert.equal(Object.keys(Object.fromEntries(store)).filter(x=>x.startsWith('key:')).length,2);
+assert.ok(!billable({blocked:'bot_challenge',fields:{}}));assert.ok(!billable({fields:{official_site:{},open_signal:{}}}));
+assert.equal(cleanTitle('Home | Hotel Sacher &amp; Co'),'Hotel Sacher & Co');
+console.log('unit OK');

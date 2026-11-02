@@ -1,0 +1,70 @@
+{
+ "openapi": "3.1.0",
+ "info": {
+  "title": "Local Business Facts API",
+  "version": "0.2.0",
+  "description": "Worldwide, any page language. Business information only; no personal data. $10 = 500 lookups: https://buy.stripe.com/14A4gz0CEgg800Cdki0x200"
+ },
+ "servers": [
+  {
+   "url": "https://agentric-facts.agentric.workers.dev"
+  }
+ ],
+ "components": {
+  "securitySchemes": {
+   "apiKey": {
+    "type": "apiKey",
+    "in": "header",
+    "name": "x-api-key"
+   }
+  }
+ },
+ "security": [
+  {
+   "apiKey": []
+  }
+ ],
+ "paths": {
+  "/v1/lookup": {
+   "get": {
+    "summary": "Source-cited business facts from a URL",
+    "parameters": [
+     {
+      "name": "url",
+      "in": "query",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     },
+     {
+      "name": "country",
+      "in": "query",
+      "schema": {
+       "type": "string"
+      },
+      "description": "Optional ISO 3166-1 alpha-2"
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Facts JSON"
+     },
+     "402": {
+      "description": "Payment required"
+     }
+    }
+   }
+  },
+  "/balance": {
+   "get": {
+    "summary": "Remaining credits",
+    "responses": {
+     "200": {
+      "description": "ok"
+     }
+    }
+   }
+  }
+ }
+}

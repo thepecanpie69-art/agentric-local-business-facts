@@ -1,0 +1,11 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.thepecanpie69-art/agentric-local-business-facts",
+  "title": "Local Business Facts",
+  "description": "Source-cited business facts (phone, address, hours, socials) from any website, worldwide.",
+  "version": "0.2.0",
+  "repository": {"url": "https://github.com/thepecanpie69-art/agentric-local-business-facts", "source": "github"},
+  "websiteUrl": "https://agentric-facts.agentric.workers.dev",
+  "remotes": [{"type": "streamable-http", "url": "https://agentric-facts.agentric.workers.dev/mcp",
+    "headers": [{"name": "x-api-key", "description": "Prepaid API key ($10 per 500 lookups at https://buy.stripe.com/14A4gz0CEgg800Cdki0x200)", "isRequired": true, "isSecret": true}]}]
+}
