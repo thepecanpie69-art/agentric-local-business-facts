@@ -4,5 +4,6 @@
 - Price: $10 = 500 lookups prepaid: https://buy.stripe.com/14A4gz0CEgg800Cdki0x200 (key shown after checkout). 1 credit only when facts are found; bot-blocked or failed lookups are free.
 - Monthly: $19/mo = 2,000 lookups (https://buy.stripe.com/28EcN599a1le00C6VU0x201), $49/mo = 10,000 (https://buy.stripe.com/6oU14n5WYgg814G9420x202); credits reset each billing month.
 - Bulk CSV tool for humans: https://agentric-facts.agentric.workers.dev/bulk
+- Local Lead Lists: https://agentric-facts.agentric.workers.dev/leads ($19 per city + business type CSV from OpenStreetMap, enriched; free preview of the count)
 - Free trial: 5 lookups per IP per day with no key. After that, HTTP 402 with the purchase link.
 - GET https://agentric-facts.agentric.workers.dev/balance · OpenAPI: https://agentric-facts.agentric.workers.dev/openapi.json · MCP (streamable HTTP): POST https://agentric-facts.agentric.workers.dev/mcp, tool lookup_business {url, country?}

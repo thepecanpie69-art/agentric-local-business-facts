@@ -44,6 +44,44 @@ export async function lookup(target,countryIn){
 }
 export const billable=r=>!!(r&&!r.blocked&&!r.error&&r.fields&&(r.fields.name||r.fields.phone||r.fields.address||r.fields.socials));
 
+// ---- Local Lead Lists (OpenStreetMap via Nominatim + Overpass; ODbL attribution required) ----
+const OSM_UA='AgentricLeadLists/0.1 (+https://agentric-facts.agentric.workers.dev/leads)';
+export const OSM_ATTR='Data © OpenStreetMap contributors, ODbL 1.0, https://www.openstreetmap.org/copyright';
+export const LEADS_LINKS=new Set(['plink_1UXPZPGfxoYz2IOsyldLMfCu']);
+export const CREDIT_LINKS=new Set(['plink_1UXCgNGfxoYz2IOsefapMVxC','plink_1UXPPjGfxoYz2IOsi8a4ZD54','plink_1UXPPpGfxoYz2IOsnGo2IZii']);
+export const LEADS_PRICE_CENTS=1900;export const LEADS_MIN=20;
+const D=(f,x)=>f.map(s=>s.replace('X',x));
+export const CATS={
+ 'auto-detailing':['nwr["amenity"="car_wash"]X','nwr["name"~"detail",i]["shop"]X','nwr["name"~"detail",i]["craft"]X','nwr["shop"="car_repair"]["name"~"detail|ceramic|tint",i]X'],
+ 'auto-repair':['nwr["shop"="car_repair"]X','nwr["shop"="tyres"]X'],
+ 'restaurants':['nwr["amenity"="restaurant"]X','nwr["amenity"="fast_food"]X'],
+ 'cafes':['nwr["amenity"="cafe"]X'],'bars':['nwr["amenity"~"^(bar|pub)$"]X'],
+ 'hair-salons-barbers':['nwr["shop"="hairdresser"]X'],'beauty-nail-salons':['nwr["shop"~"^(beauty|cosmetics)$"]X'],
+ 'dentists':['nwr["amenity"="dentist"]X','nwr["healthcare"="dentist"]X'],'doctors-clinics':['nwr["amenity"~"^(doctors|clinic)$"]X'],
+ 'gyms':['nwr["leisure"="fitness_centre"]X'],'plumbers':['nwr["craft"="plumber"]X'],'electricians':['nwr["craft"="electrician"]X'],
+ 'hvac':['nwr["craft"="hvac"]X'],'roofers':['nwr["craft"="roofer"]X'],'real-estate':['nwr["office"="estate_agent"]X'],
+ 'lawyers':['nwr["office"="lawyer"]X'],'accountants':['nwr["office"~"^(accountant|tax_advisor)$"]X'],'hotels':['nwr["tourism"~"^(hotel|motel)$"]X'],
+ 'florists':['nwr["shop"="florist"]X'],'vets-pet-grooming':['nwr["amenity"="veterinary"]X','nwr["shop"="pet_grooming"]X'],
+ 'landscaping':['nwr["craft"="gardener"]X','nwr["shop"="garden_centre"]X'],'insurance':['nwr["office"="insurance"]X']};
+async function geocode(city){const r=await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q='+encodeURIComponent(city),{headers:{'user-agent':OSM_UA,'accept-language':'en'},signal:AbortSignal.timeout(10000)});if(!r.ok)throw new Error('geocoder '+r.status);const j=await r.json();if(!j[0])return null;
+ let [s,n,w,e]=j[0].boundingbox.map(Number);const lat=+j[0].lat,lon=+j[0].lon;const cap=0.35;if(n-s>cap){s=lat-cap/2;n=lat+cap/2;}if(e-w>cap){w=lon-cap/2;e=lon+cap/2;}return {display:j[0].display_name,bbox:[s,w,n,e]};}
+async function overpass(sel,bbox){const b='('+bbox.map(x=>x.toFixed(4)).join(',')+')';const q='[out:json][timeout:25];('+sel.map(x=>x.replace('X',b)).join(';')+';);out center tags 400;';
+ const errs=[];for(const ep of ['https://overpass.openstreetmap.fr/api/interpreter','https://overpass-api.de/api/interpreter','https://overpass.private.coffee/api/interpreter']){try{const r=await fetch(ep+'?data='+encodeURIComponent(q),{headers:{'user-agent':OSM_UA,'accept':'application/json'},signal:AbortSignal.timeout(30000)});if(r.ok)return (await r.json()).elements||[];errs.push(new URL(ep).host+':'+r.status);}catch(e){errs.push(new URL(ep).host+':'+String(e.message).slice(0,40));}}throw new Error('map data service busy, try again in a minute ('+errs.join('; ')+')');}
+export function osmItem(e){const t=e.tags||{};const src=`https://www.openstreetmap.org/${e.type}/${e.id}`;const addr=[[t['addr:housenumber'],t['addr:street']].filter(Boolean).join(' '),t['addr:city'],t['addr:state'],t['addr:postcode']].filter(Boolean).join(', ')||null;
+ let web=t.website||t['contact:website']||t.url||null;if(web&&!/^https?:/i.test(web))web='https://'+web;
+ return {name:t.name||null,phone:t.phone||t['contact:phone']||null,website:web,address:addr,hours:t.opening_hours||null,email:t.email||t['contact:email']||null,category:t.shop||t.amenity||t.craft||t.office||t.leisure||t.tourism||t.healthcare||null,lat:e.lat??e.center?.lat,lon:e.lon??e.center?.lon,osm_source:src};}
+export async function buildQuote(env,city,cat){if(!CATS[cat])return {error:'unknown category'};city=String(city||'').trim().slice(0,120);if(city.length<2)return {error:'city required'};
+ const g=await geocode(city);if(!g)return {error:'city not found'};const els=await overpass(CATS[cat],g.bbox);
+ const seen=new Set();const items=[];for(const e of els){const it=osmItem(e);if(!it.name)continue;const k=(it.name+'|'+(it.address||'')).toLowerCase();if(seen.has(k))continue;seen.add(k);items.push(it);if(items.length>=300)break;}
+ const id=[...crypto.getRandomValues(new Uint8Array(12))].map(b=>b.toString(16).padStart(2,'0')).join('');
+ const q={id,city,cat,display:g.display,bbox:g.bbox,items,created:Date.now()};if(items.length)await env.CREDITS.put('quote:'+id,JSON.stringify(q),{expirationTtl:14*86400});
+ return {quote_id:items.length>=LEADS_MIN?id:null,min_to_buy:LEADS_MIN,city:g.display,category:cat,count:items.length,with_phone:items.filter(i=>i.phone).length,with_website:items.filter(i=>i.website).length,with_address:items.filter(i=>i.address).length,with_hours:items.filter(i=>i.hours).length,sample:items.slice(0,3).map(i=>i.name)};}
+export async function fulfillLeads(env,s){if(!s?.id)return {error:'no session'};const prev=await env.CREDITS.get('order:'+s.id);if(prev)return {repeat:true};
+ if(s.payment_status!=='paid'&&s.payment_status!=='no_payment_required')return {error:'not paid'};if((s.amount_subtotal||0)<LEADS_PRICE_CENTS)return {error:'amount too small'};
+ const q=s.client_reference_id&&await env.CREDITS.get('quote:'+s.client_reference_id,'json');if(!q||q.items.length<LEADS_MIN){await env.CREDITS.put('leadissue:'+s.id,JSON.stringify({ref:s.client_reference_id||null,email:s.customer_details?.email||null,at:Date.now()}));return {error:'quote not found',needs_manual:true};}
+ await env.CREDITS.put('order:'+s.id,JSON.stringify({...q,session:s.id,email:s.customer_details?.email||null,paid_at:Date.now()}));return {ok:true,count:q.items.length};}
+
+const LEADS_URL='https://buy.stripe.com/8x214n99a3tmaFg1BA0x203';
 // ---- credits ----
 const J=(o,s=200,h={})=>new Response(JSON.stringify(o,null,1),{status:s,headers:{'content-type':'application/json','access-control-allow-origin':'*',...h}});
 export function apiKeyOf(req){const k=req.headers.get('x-api-key');if(k)return k.trim();const a=req.headers.get('authorization')||'';const m=a.match(/^Bearer\s+(\S+)/i);return m?m[1]:null;}
@@ -55,6 +93,7 @@ const TRIAL_PER_DAY=5;
 // Free trial: no key -> up to 5 lookups/IP/UTC day. One KV write per trial request (expires in 2 days).
 export const ipBucket=ip=>ip.includes(':')?ip.split(':').slice(0,3).join(':')+'::/48':ip;
 const TRIAL_GLOBAL_PER_DAY=500;
+export async function rateLimit(env,req,tag,limit){if(!env.COUNTER)return true;const ip=ipBucket(req.headers.get('cf-connecting-ip')||'unknown');return (await dobj(env,tag+':'+new Date().toISOString().slice(0,10)+':'+ip,{op:'trial',limit})).left>=0;}
 export async function trialUse(env,req){const ip=ipBucket(req.headers.get('cf-connecting-ip')||'unknown');const day=new Date().toISOString().slice(0,10);const name='trial:'+day+':'+ip;if(env.COUNTER){const r=await dobj(env,name,{op:'trial',limit:TRIAL_PER_DAY});if(r.left<0)return -1;const g=await dobj(env,'trialglobal:'+day,{op:'trial',limit:TRIAL_GLOBAL_PER_DAY});return g.left<0?-1:r.left;}const n=Number(await env.CREDITS.get(name)||0);if(n>=TRIAL_PER_DAY)return -1;await env.CREDITS.put(name,String(n+1),{expirationTtl:172800});return TRIAL_PER_DAY-n-1;}
 // Durable Object (SQLite-backed, free plan): strongly consistent counters for trial use and key credits.
 export class Counter{constructor(state){this.s=state.storage;}
@@ -137,22 +176,34 @@ export default {async fetch(req,env){
     if(!env.STRIPE_WEBHOOK_SECRET)return J({error:'webhook not configured'},503);
     const body=await req.text();if(!await verifyStripeSig(body,req.headers.get('stripe-signature'),env.STRIPE_WEBHOOK_SECRET))return J({error:'bad signature'},400);
     const ev=JSON.parse(body);
-    if(ev.type==='checkout.session.completed'||ev.type==='checkout.session.async_payment_succeeded'){const s=ev.data.object;const r=await fulfill(env,s);return J({ok:!r.error,repeat:!!r.repeat,error:r.error});}
+    if(ev.type==='checkout.session.completed'||ev.type==='checkout.session.async_payment_succeeded'){const s=ev.data.object;if(LEADS_LINKS.has(s.payment_link)){const r=await fulfillLeads(env,s);return J({ok:!r.error,repeat:!!r.repeat,error:r.error,product:'leads'});}if(!CREDIT_LINKS.has(s.payment_link))return J({ignored:'unknown product'});const r=await fulfill(env,s);return J({ok:!r.error,repeat:!!r.repeat,error:r.error});}
     if(ev.type==='invoice.paid'||ev.type==='customer.subscription.deleted')return J(await onSubEvent(env,ev));
     return J({ignored:ev.type});}
   if(P==='/thanks'){const sid=u.searchParams.get('session_id')||'';
     if(!/^cs_(live|test)_[A-Za-z0-9]+$/.test(sid))return page('<h1>Missing checkout session</h1><p>Open this page from the Stripe receipt redirect.</p>');
+    if(await env.CREDITS.get('leadissue:'+sid))return page('<h1>Payment received, but we could not match your list</h1><p>This happens if checkout was opened without picking a city and category first on <a href=/leads>/leads</a>. Reply to your Stripe receipt with the city and business type you want, or ask for a full refund. Your reference: <code>'+esc(sid)+'</code></p>');
+    if(await env.CREDITS.get('order:'+sid))return Response.redirect(origin+'/leads/order?session_id='+sid,302);
     let rec=await env.CREDITS.get('sess:'+sid,'json');
-    if(!rec&&env.STRIPE_API_KEY){const s=await stripeSession(env,sid);if(s){const r=await fulfill(env,s);if(!r.error)rec=r;}}
+    if(!rec&&env.STRIPE_API_KEY){const s=await stripeSession(env,sid);if(s&&LEADS_LINKS.has(s.payment_link)){const r=await fulfillLeads(env,s);if(r.ok||r.repeat)return Response.redirect(origin+'/leads/order?session_id='+sid,302);}if(s&&CREDIT_LINKS.has(s.payment_link)){const r=await fulfill(env,s);if(!r.error)rec=r;}}
     if(!rec)return page('<h1>Payment received — issuing your key…</h1><p>This page refreshes automatically. If nothing appears in 2 minutes, reply to your Stripe receipt with your session id: <code>'+esc(sid)+'</code></p>','<meta http-equiv=refresh content=5>');
     return page(`<h1>Your API key</h1><p><code style="font-size:1.2em;background:#eee;padding:6px">${esc(rec.key)}</code></p><p><b>${rec.credits}</b> lookups loaded. Save this key now; this page always shows the same key for this purchase.</p><pre>curl "${origin}/v1/lookup?url=https://www.sacher.com" -H "x-api-key: ${esc(rec.key)}"</pre><p>Balance: <code>${origin}/balance</code> with the same header. MCP: POST <code>${origin}/mcp</code>.</p>`);}
+
+  if(P==='/leads')return page(LEADS_HTML(origin));
+  if(P==='/v1/leads/preview'){const ok=await rateLimit(env,req,'leadprev',15);if(!ok)return J({error:'preview limit reached for today'},429);
+    try{return J(await buildQuote(env,u.searchParams.get('city'),u.searchParams.get('category')));}catch(e){return J({error:String(e.message)},502);}}
+  if(P==='/v1/leads/order'||P==='/v1/leads/enrich'){const sid=u.searchParams.get('session_id')||'';const o=/^cs_(live|test)_[A-Za-z0-9]+$/.test(sid)&&await env.CREDITS.get('order:'+sid,'json');if(!o)return J({error:'order not found'},404);
+    if(P==='/v1/leads/order')return J({city:o.display,category:o.cat,count:o.items.length,items:o.items,attribution:OSM_ATTR,license:'OSM-derived fields are ODbL 1.0'});
+    const i=Number(u.searchParams.get('i'));const it=o.items[i];if(!it||!it.website)return J({error:'no website for row'},400);
+    const left=env.COUNTER?(await dobj(env,'enrich:'+sid,{op:'trial',limit:o.items.length*2+10})).left:1;if(left<0)return J({error:'enrichment limit reached for this order'},429);
+    try{return J(await lookup(it.website));}catch(e){return J({error:String(e.message)},502);}}
+  if(P==='/leads/order')return page(ORDER_HTML(origin));
   if(P==='/bulk')return page(BULK_HTML(origin));
   if(P==='/openapi.json')return J(OPENAPI(origin));
   if(P==='/llms.txt')return new Response(LLMS(origin),{headers:{'content-type':'text/plain;charset=utf-8'}});
   if(P==='/.well-known/mcp.json')return J({name:'local-business-facts',description:'Source-cited business facts from any website, worldwide.',transport:'streamable-http',url:origin+'/mcp',auth:{type:'api_key',header:'x-api-key',optional_for_trial:true},free_trial:'5 lookups/IP/day',pricing:'$10 per 500 lookups',buy:PAY_LINK,registry:'io.github.thepecanpie69-art/agentric-local-business-facts',tools:TOOLS.map(t=>t.name)});
   if(P==='/.well-known/ai-plugin.json')return J({schema_version:'v1',name_for_human:'Local Business Facts',name_for_model:'local_business_facts',description_for_human:'Source-cited facts (phone, address, hours, socials) from any business website, worldwide.',description_for_model:'Given a business website URL, returns JSON facts (name, phone raw+E.164, address, hours, socials, open/closed signal), each with source URL and confidence. Coverage is partial: only what the site publishes. 5 free lookups/IP/day, then x-api-key ($10/500).',auth:{type:'none'},api:{type:'openapi',url:origin+'/openapi.json'},logo_url:'https://github.com/thepecanpie69-art.png',contact_email:'',legal_info_url:'https://github.com/thepecanpie69-art/agentric-local-business-facts'});
   if(P==='/.well-known/agent.json'||P==='/.well-known/agent-card.json')return J({name:'Local Business Facts',description:'Source-cited business facts from any business website URL, worldwide, any language.',url:origin,version:'0.3.0',provider:{organization:'Agentric',url:origin},capabilities:{streaming:false},defaultInputModes:['text/plain'],defaultOutputModes:['application/json'],interfaces:{rest:origin+'/openapi.json',mcp:origin+'/mcp',llms_txt:origin+'/llms.txt'},skills:[{id:'lookup_business',name:'Business facts lookup',description:'URL in, JSON facts out (name, phone, address, hours, socials), each with source URL and confidence.',tags:['local-business','enrichment','e164'],examples:['https://www.sacher.com']}],pricing:{free_trial:'5 lookups/IP/day',paid:'$10 per 500 lookups',buy:PAY_LINK}});
-  if(P==='/')return page(`<h1>Local Business Facts API</h1><p>Worldwide, any language. Send a business website URL, get source-cited facts as JSON: name, phone (raw + E.164), address, hours, socials, open/closed signal. Each field has its source URL, method and confidence. Business information only, no personal data.</p><p><b>$10 = 500 lookups</b> (2¢ each). Try 5 free lookups a day with no key. Only successful paid lookups use a credit. <a href="${PAY_LINK}">Buy credits</a>; your key appears right after checkout.</p><pre>curl "${origin}/v1/lookup?url=https://www.sacher.com&country=AT" -H "x-api-key: YOUR_KEY"</pre><p><a href=/bulk><b>Bulk CSV tool</b></a> (paste a list of websites, download a spreadsheet) · ${PRICING()} <a href=/openapi.json>OpenAPI</a> · <a href=/llms.txt>llms.txt</a> · MCP: POST ${origin}/mcp (tool lookup_business)</p>`);
+  if(P==='/')return page(`<h1>Local Business Facts API</h1><p>Worldwide, any language. Send a business website URL, get source-cited facts as JSON: name, phone (raw + E.164), address, hours, socials, open/closed signal. Each field has its source URL, method and confidence. Business information only, no personal data.</p><p><b>$10 = 500 lookups</b> (2¢ each). Try 5 free lookups a day with no key. Only successful paid lookups use a credit. <a href="${PAY_LINK}">Buy credits</a>; your key appears right after checkout.</p><pre>curl "${origin}/v1/lookup?url=https://www.sacher.com&country=AT" -H "x-api-key: YOUR_KEY"</pre><p><a href=/leads><b>Local Lead Lists ($19)</b></a> (city + business type → CSV) · <a href=/bulk><b>Bulk CSV tool</b></a> (paste a list of websites, download a spreadsheet) · ${PRICING()} <a href=/openapi.json>OpenAPI</a> · <a href=/llms.txt>llms.txt</a> · MCP: POST ${origin}/mcp (tool lookup_business)</p>`);
   return J({error:'not found'},404);
 }};
 
@@ -173,12 +224,34 @@ dl.onclick=()=>{const head=['input',...F,'phone_e164',...F.map(x=>x+'_source'),'
  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download='business-facts.csv';a.click();};
 </script>`;
 const PRICING=()=>SUB_LINKS.starter?`Monthly plans: <a href="${SUB_LINKS.starter}">$19/mo for 2,000 lookups</a> · <a href="${SUB_LINKS.pro}">$49/mo for 10,000</a> (cancel anytime) · `:'';
+
+const CAT_OPTS=()=>Object.keys(CATS).map(c=>`<option value="${c}">${c.replace(/-/g,' ')}</option>`).join('');
+const LEADS_HTML=o=>`<h1>Local Lead Lists: $19 per list</h1><p>Pick a city and a business type. You get a downloadable CSV of local businesses with name, phone, address, website and hours where findable. Every row links to its source: the OpenStreetMap record, plus the business's own website when we could read it.</p>
+<p><b>Honest coverage note:</b> the list comes from OpenStreetMap. It's strong for some places and categories and thin for others, and small home-based businesses are often missing. Preview the count for free before you buy.</p>
+<p><input id=c placeholder="City, e.g. Keller, TX" style="width:60%;padding:6px"> <select id=t>${CAT_OPTS()}</select> <button id=p>Preview (free)</button></p><div id=r></div>
+<p style="font-size:.85em;color:#555">${OSM_ATTR}</p>
+<script>p.onclick=async()=>{r.textContent='Searching map data…';const d=await (await fetch('/v1/leads/preview?city='+encodeURIComponent(c.value)+'&category='+t.value)).json();
+if(d.error){r.textContent='Error: '+d.error;return;}if(d.count&&!d.quote_id){r.innerHTML='Only <b>'+d.count+'</b> found in <b>'+d.city+'</b>. That is too few to be worth $19, so it is not for sale. Try a larger nearby city or another category.';return;}if(!d.count){r.innerHTML='No businesses of that type found in OpenStreetMap for <b>'+d.city+'</b>. Try a nearby larger city or another category.';return;}
+r.innerHTML='<p><b>'+d.count+'</b> businesses found in <b>'+d.city+'</b>. In the map data, '+d.with_phone+' have a phone, '+d.with_website+' a website, '+d.with_address+' an address and '+d.with_hours+' hours. After purchase we also read each website for more contact details. Examples: '+d.sample.join(', ')+'.</p><p><a href="${LEADS_URL}?client_reference_id='+d.quote_id+'" style="font-size:1.2em"><b>Buy this list: $19</b></a> (the CSV is generated right after checkout)</p>';};</script>`;
+const ORDER_HTML=o=>`<h1>Your lead list</h1><p id=st>Loading…</p><p><button id=dl disabled>Download CSV</button></p><pre id=log style="white-space:pre-wrap;max-height:300px;overflow:auto"></pre><p style="font-size:.85em;color:#555">${OSM_ATTR}. Bookmark this page; you can come back and download again.</p>
+<script>const sid=new URLSearchParams(location.search).get('session_id');let rows=[];
+const q=v=>'"'+String(v==null?'':typeof v==='object'?JSON.stringify(v):v).replace(/"/g,'""')+'"';
+(async()=>{const o=await (await fetch('/v1/leads/order?session_id='+encodeURIComponent(sid))).json();if(o.error){st.textContent='Order not found yet. If you just paid, refresh in a few seconds.';setTimeout(()=>location.reload(),5000);return;}
+for(let i=0;i<o.items.length;i++){const it=o.items[i];st.textContent='Building '+o.category+' list for '+o.city+': '+(i+1)+'/'+o.items.length;let f={};
+ if(it.website){try{const d=await (await fetch('/v1/leads/enrich?session_id='+encodeURIComponent(sid)+'&i='+i)).json();f=d.fields||{};}catch(e){}}
+ const pick=(a,k)=>a?[a,it.osm_source]:(f[k]?[f[k].value,f[k].source]:['','']);const ph=pick(it.phone,'phone'),ad=pick(it.address,'address'),hr=pick(it.hours,'hours');
+ rows.push([it.name,ph[0],(f.phone&&f.phone.e164)||'',ph[1],ad[0],ad[1],it.website||'',hr[0],hr[1],it.email||'',(f.socials&&f.socials.value)||'',it.category,it.lat,it.lon,it.osm_source,(f.open_signal&&f.open_signal.value)||'']);
+ log.textContent+=it.name+(ph[0]?' · '+ph[0]:'')+'\\n';}
+st.textContent='Done: '+rows.length+' businesses ('+o.category+', '+o.city+').';dl.disabled=false;
+dl.onclick=()=>{const head=['name','phone','phone_e164','phone_source','address','address_source','website','hours','hours_source','email','socials','category','lat','lon','osm_source','website_status'];
+const csv=[head,...rows].map(r=>r.map(q).join(',')).join('\\n')+'\\n'+q(o.attribution+'. '+o.license);const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download='leads-'+o.category+'.csv';a.click();};})();</script>`;
 const LLMS=o=>`# Local Business Facts API (worldwide)
 > Send any business's website URL (any country, any language). Get JSON facts: name, phone (raw + E.164), postal address, opening hours, socials, open/closed signal, page language, country. Each field has source URL, extraction method and confidence. Business info only, no personal data.
 - GET ${o}/v1/lookup?url=<site>&country=<ISO2 optional>  (header x-api-key or Authorization: Bearer)
 - Price: $10 = 500 lookups prepaid: ${PAY_LINK} (key shown after checkout). 1 credit only when facts are found; bot-blocked or failed lookups are free.
 - Monthly: $19/mo = 2,000 lookups (${SUB_LINKS.starter}), $49/mo = 10,000 (${SUB_LINKS.pro}); credits reset each billing month.
 - Bulk CSV tool for humans: ${o}/bulk
+- Local Lead Lists: ${o}/leads ($19 per city + business type CSV from OpenStreetMap, enriched; free preview of the count)
 - Free trial: 5 lookups per IP per day with no key. After that, HTTP 402 with the purchase link.
 - GET ${o}/balance · OpenAPI: ${o}/openapi.json · MCP (streamable HTTP): POST ${o}/mcp, tool lookup_business {url, country?}
 `;
