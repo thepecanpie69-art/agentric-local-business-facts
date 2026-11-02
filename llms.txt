@@ -2,5 +2,5 @@
 > Send any business's website URL (any country, any language). Get JSON facts: name, phone (raw + E.164), postal address, opening hours, socials, open/closed signal, page language, country. Each field has source URL, extraction method and confidence. Business info only, no personal data.
 - GET https://agentric-facts.agentric.workers.dev/v1/lookup?url=<site>&country=<ISO2 optional>  (header x-api-key or Authorization: Bearer)
 - Price: $10 = 500 lookups prepaid: https://buy.stripe.com/14A4gz0CEgg800Cdki0x200 (key shown after checkout). 1 credit only when facts are found; bot-blocked or failed lookups are free.
-- Without a key: HTTP 402 with purchase info. x402/USDC not enabled yet.
+- Free trial: 5 lookups per IP per day with no key. After that, HTTP 402 with the purchase link.
 - GET https://agentric-facts.agentric.workers.dev/balance · OpenAPI: https://agentric-facts.agentric.workers.dev/openapi.json · MCP (streamable HTTP): POST https://agentric-facts.agentric.workers.dev/mcp, tool lookup_business {url, country?}

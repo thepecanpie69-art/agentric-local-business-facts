@@ -20,6 +20,7 @@
   }
  },
  "security": [
+  {},
   {
    "apiKey": []
   }
@@ -27,7 +28,7 @@
  "paths": {
   "/v1/lookup": {
    "get": {
-    "summary": "Source-cited business facts from a URL",
+    "summary": "Source-cited business facts from a URL (5 free/IP/day without a key)",
     "parameters": [
      {
       "name": "url",
