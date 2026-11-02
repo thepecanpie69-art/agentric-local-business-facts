@@ -2,6 +2,7 @@
 // Secrets (optional until set): STRIPE_WEBHOOK_SECRET (whsec_...), STRIPE_API_KEY (rk_live_ read-only Checkout Sessions).
 const PRICE_USD=0.03, PACK_CENTS=1000, PACK_CREDITS=500;
 const PAY_LINK='https://buy.stripe.com/14A4gz0CEgg800Cdki0x200';
+const SUB_LINKS={starter:'https://buy.stripe.com/28EcN599a1le00C6VU0x201',pro:'https://buy.stripe.com/6oU14n5WYgg814G9420x202'};// filled after delivery is verified
 const PLINK_ID='plink_1UXCgNGfxoYz2IOsefapMVxC';
 const CC={US:'1',CA:'1',GB:'44',UK:'44',IE:'353',FR:'33',DE:'49',AT:'43',CH:'41',IT:'39',ES:'34',PT:'351',NL:'31',BE:'32',DK:'45',SE:'46',NO:'47',FI:'358',PL:'48',AU:'61',NZ:'64',JP:'81',KR:'82',CN:'86',IN:'91',SG:'65',BR:'55',MX:'52',AR:'54',ZA:'27',AE:'971',TR:'90',IL:'972',NG:'234',KE:'254',PH:'63',ID:'62',TH:'66'};
 const TLD={uk:'GB',fr:'FR',de:'DE',at:'AT',ch:'CH',it:'IT',es:'ES',pt:'PT',nl:'NL',be:'BE',dk:'DK',se:'SE',no:'NO',fi:'FI',pl:'PL',au:'AU',nz:'NZ',jp:'JP',kr:'KR',cn:'CN',in:'IN',sg:'SG',br:'BR',mx:'MX',ar:'AR',za:'ZA',ae:'AE',tr:'TR',il:'IL',ie:'IE',ca:'CA',ng:'NG',ke:'KE',ph:'PH',id:'ID',th:'TH'};
@@ -49,7 +50,7 @@ export function apiKeyOf(req){const k=req.headers.get('x-api-key');if(k)return k
 async function dobj(env,name,body){const st=env.COUNTER.get(env.COUNTER.idFromName(name));return (await st.fetch('https://do/',{method:'POST',body:JSON.stringify(body)})).json();}
 async function getAcct(env,k){if(!k||!/^agf_[a-f0-9]{32}$/.test(k))return null;const a=await env.CREDITS.get('key:'+k,'json');if(!a)return null;if(env.COUNTER){const r=await dobj(env,'key:'+k,{op:'get',init:a.credits});a.credits=r.credits;a.used=r.used;}return a;}
 async function charge(env,k,acct){if(env.COUNTER){const r=await dobj(env,'key:'+k,{op:'dec',init:acct.credits});return r.credits;}acct.credits-=1;acct.used=(acct.used||0)+1;acct.last=Date.now();await env.CREDITS.put('key:'+k,JSON.stringify(acct));return acct.credits;}
-function pay402(origin,msg){return J({error:msg||'payment required',free_trial:'5 free lookups per IP per day without a key (used up)',prepaid:{price:'$10 = 500 lookups',buy:PAY_LINK,after_payment:origin+'/thanks shows your API key',use:'header x-api-key: <key> or Authorization: Bearer <key>'}},402);}
+function pay402(origin,msg){return J({error:msg||'payment required',free_trial:'5 free lookups per IP per day without a key (used up)',prepaid:{price:'$10 = 500 lookups',monthly:{starter:'$19/mo = 2,000: '+SUB_LINKS.starter,pro:'$49/mo = 10,000: '+SUB_LINKS.pro},buy:PAY_LINK,after_payment:origin+'/thanks shows your API key',use:'header x-api-key: <key> or Authorization: Bearer <key>'}},402);}
 const TRIAL_PER_DAY=5;
 // Free trial: no key -> up to 5 lookups/IP/UTC day. One KV write per trial request (expires in 2 days).
 export const ipBucket=ip=>ip.includes(':')?ip.split(':').slice(0,3).join(':')+'::/48':ip;
@@ -60,11 +61,13 @@ export class Counter{constructor(state){this.s=state.storage;}
   async fetch(req){const b=await req.json();
     if(b.op==='trial'){const n=(await this.s.get('n'))||0;if(n>=b.limit)return Response.json({left:-1});await this.s.put('n',n+1);if(n===0)await this.s.setAlarm(Date.now()+172800000);return Response.json({left:b.limit-n-1});}
     let c=await this.s.get('credits');if(c===undefined){c=b.init||0;await this.s.put('credits',c);}let used=(await this.s.get('used'))||0;
+    if(b.op==='set'){c=b.credits;await this.s.put('credits',c);}
     if(b.op==='dec'&&c>0){c--;used++;await this.s.put({credits:c,used});}
     return Response.json({credits:c,used});}
   async alarm(){await this.s.deleteAll();}}
 const newKey=()=>'agf_'+[...crypto.getRandomValues(new Uint8Array(16))].map(b=>b.toString(16).padStart(2,'0')).join('');
-export function creditsFor(s){const sub=s.amount_subtotal??s.amount_total??0;return Math.max(0,Math.floor(sub/PACK_CENTS))*PACK_CREDITS;}
+export const PLANS={1900:2000,4900:10000};// monthly subscription: subtotal cents -> credits per month
+export function creditsFor(s){if(s.mode==='subscription')return PLANS[s.amount_subtotal]||0;const sub=s.amount_subtotal??s.amount_total??0;return Math.max(0,Math.floor(sub/PACK_CENTS))*PACK_CREDITS;}
 // Idempotent: one session id -> one key, credited once.
 export async function fulfill(env,s){
   if(!s||!s.id)return {error:'no session'};
@@ -75,9 +78,17 @@ export async function fulfill(env,s){
   const key=newKey();const rec={key,credits,session:s.id,email:s.customer_details?.email||null,livemode:!!s.livemode,created:Date.now()};
   await env.CREDITS.put('key:'+key,JSON.stringify({credits,used:0,session:s.id,created:rec.created}));
   await env.CREDITS.put('sess:'+s.id,JSON.stringify(rec));
+  if(s.mode==='subscription'&&s.subscription){rec.plan_monthly=credits;await env.CREDITS.put('sub:'+s.subscription,JSON.stringify({key,credits}));await env.CREDITS.put('sess:'+s.id,JSON.stringify(rec));}
   const day='stat:'+new Date().toISOString().slice(0,10);const st=(await env.CREDITS.get(day,'json'))||{purchases:0,credits_sold:0,subtotal_cents:0};st.purchases++;st.credits_sold+=credits;st.subtotal_cents+=(s.amount_subtotal||0);await env.CREDITS.put(day,JSON.stringify(st));
   return rec;
 }
+async function setCredits(env,key,credits){if(env.COUNTER)return dobj(env,'key:'+key,{op:'set',credits});const a=await env.CREDITS.get('key:'+key,'json');a.credits=credits;await env.CREDITS.put('key:'+key,JSON.stringify(a));}
+export async function onSubEvent(env,ev){const o=ev.data.object;
+  if(ev.type==='invoice.paid'){const sid=o.subscription||o.parent?.subscription_details?.subscription;if(!sid||o.billing_reason==='subscription_create')return {ignored:'first invoice handled by checkout'};
+    const done=await env.CREDITS.get('inv:'+o.id);if(done)return {repeat:true};const sub=await env.CREDITS.get('sub:'+sid,'json');if(!sub)return {error:'unknown subscription'};
+    await setCredits(env,sub.key,sub.credits);await env.CREDITS.put('inv:'+o.id,'1',{expirationTtl:5184000});return {ok:true,renewed:sub.credits};}
+  if(ev.type==='customer.subscription.deleted'){const sub=await env.CREDITS.get('sub:'+o.id,'json');if(!sub)return {error:'unknown subscription'};await setCredits(env,sub.key,0);return {ok:true,cancelled:true};}
+  return {ignored:ev.type};}
 const hex=b=>[...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('');
 export async function verifyStripeSig(body,header,secret,tolSec=300,now=Date.now()){
   if(!header||!secret)return false;const parts=Object.fromEntries([]);let t=null;const v1=[];
@@ -126,26 +137,48 @@ export default {async fetch(req,env){
     if(!env.STRIPE_WEBHOOK_SECRET)return J({error:'webhook not configured'},503);
     const body=await req.text();if(!await verifyStripeSig(body,req.headers.get('stripe-signature'),env.STRIPE_WEBHOOK_SECRET))return J({error:'bad signature'},400);
     const ev=JSON.parse(body);
-    if(ev.type==='checkout.session.completed'||ev.type==='checkout.session.async_payment_succeeded'){const s=ev.data.object;if(s.payment_link&&s.payment_link!==PLINK_ID)return J({ignored:'other link'});const r=await fulfill(env,s);return J({ok:!r.error,repeat:!!r.repeat,error:r.error});}
+    if(ev.type==='checkout.session.completed'||ev.type==='checkout.session.async_payment_succeeded'){const s=ev.data.object;const r=await fulfill(env,s);return J({ok:!r.error,repeat:!!r.repeat,error:r.error});}
+    if(ev.type==='invoice.paid'||ev.type==='customer.subscription.deleted')return J(await onSubEvent(env,ev));
     return J({ignored:ev.type});}
   if(P==='/thanks'){const sid=u.searchParams.get('session_id')||'';
     if(!/^cs_(live|test)_[A-Za-z0-9]+$/.test(sid))return page('<h1>Missing checkout session</h1><p>Open this page from the Stripe receipt redirect.</p>');
     let rec=await env.CREDITS.get('sess:'+sid,'json');
-    if(!rec&&env.STRIPE_API_KEY){const s=await stripeSession(env,sid);if(s&&(!s.payment_link||s.payment_link===PLINK_ID)){const r=await fulfill(env,s);if(!r.error)rec=r;}}
+    if(!rec&&env.STRIPE_API_KEY){const s=await stripeSession(env,sid);if(s){const r=await fulfill(env,s);if(!r.error)rec=r;}}
     if(!rec)return page('<h1>Payment received — issuing your key…</h1><p>This page refreshes automatically. If nothing appears in 2 minutes, reply to your Stripe receipt with your session id: <code>'+esc(sid)+'</code></p>','<meta http-equiv=refresh content=5>');
     return page(`<h1>Your API key</h1><p><code style="font-size:1.2em;background:#eee;padding:6px">${esc(rec.key)}</code></p><p><b>${rec.credits}</b> lookups loaded. Save this key now; this page always shows the same key for this purchase.</p><pre>curl "${origin}/v1/lookup?url=https://www.sacher.com" -H "x-api-key: ${esc(rec.key)}"</pre><p>Balance: <code>${origin}/balance</code> with the same header. MCP: POST <code>${origin}/mcp</code>.</p>`);}
+  if(P==='/bulk')return page(BULK_HTML(origin));
   if(P==='/openapi.json')return J(OPENAPI(origin));
   if(P==='/llms.txt')return new Response(LLMS(origin),{headers:{'content-type':'text/plain;charset=utf-8'}});
   if(P==='/.well-known/mcp.json')return J({name:'local-business-facts',description:'Source-cited business facts from any website, worldwide.',transport:'streamable-http',url:origin+'/mcp',auth:{type:'api_key',header:'x-api-key',optional_for_trial:true},free_trial:'5 lookups/IP/day',pricing:'$10 per 500 lookups',buy:PAY_LINK,registry:'io.github.thepecanpie69-art/agentric-local-business-facts',tools:TOOLS.map(t=>t.name)});
   if(P==='/.well-known/ai-plugin.json')return J({schema_version:'v1',name_for_human:'Local Business Facts',name_for_model:'local_business_facts',description_for_human:'Source-cited facts (phone, address, hours, socials) from any business website, worldwide.',description_for_model:'Given a business website URL, returns JSON facts (name, phone raw+E.164, address, hours, socials, open/closed signal), each with source URL and confidence. Coverage is partial: only what the site publishes. 5 free lookups/IP/day, then x-api-key ($10/500).',auth:{type:'none'},api:{type:'openapi',url:origin+'/openapi.json'},logo_url:'https://github.com/thepecanpie69-art.png',contact_email:'',legal_info_url:'https://github.com/thepecanpie69-art/agentric-local-business-facts'});
   if(P==='/.well-known/agent.json'||P==='/.well-known/agent-card.json')return J({name:'Local Business Facts',description:'Source-cited business facts from any business website URL, worldwide, any language.',url:origin,version:'0.3.0',provider:{organization:'Agentric',url:origin},capabilities:{streaming:false},defaultInputModes:['text/plain'],defaultOutputModes:['application/json'],interfaces:{rest:origin+'/openapi.json',mcp:origin+'/mcp',llms_txt:origin+'/llms.txt'},skills:[{id:'lookup_business',name:'Business facts lookup',description:'URL in, JSON facts out (name, phone, address, hours, socials), each with source URL and confidence.',tags:['local-business','enrichment','e164'],examples:['https://www.sacher.com']}],pricing:{free_trial:'5 lookups/IP/day',paid:'$10 per 500 lookups',buy:PAY_LINK}});
-  if(P==='/')return page(`<h1>Local Business Facts API</h1><p>Worldwide, any language. Send a business website URL, get source-cited facts as JSON: name, phone (raw + E.164), address, hours, socials, open/closed signal. Each field has its source URL, method and confidence. Business information only, no personal data.</p><p><b>$10 = 500 lookups</b> (2¢ each). Try 5 free lookups a day with no key. Only successful paid lookups use a credit. <a href="${PAY_LINK}">Buy credits</a>; your key appears right after checkout.</p><pre>curl "${origin}/v1/lookup?url=https://www.sacher.com&country=AT" -H "x-api-key: YOUR_KEY"</pre><p><a href=/openapi.json>OpenAPI</a> · <a href=/llms.txt>llms.txt</a> · MCP: POST ${origin}/mcp (tool lookup_business)</p>`);
+  if(P==='/')return page(`<h1>Local Business Facts API</h1><p>Worldwide, any language. Send a business website URL, get source-cited facts as JSON: name, phone (raw + E.164), address, hours, socials, open/closed signal. Each field has its source URL, method and confidence. Business information only, no personal data.</p><p><b>$10 = 500 lookups</b> (2¢ each). Try 5 free lookups a day with no key. Only successful paid lookups use a credit. <a href="${PAY_LINK}">Buy credits</a>; your key appears right after checkout.</p><pre>curl "${origin}/v1/lookup?url=https://www.sacher.com&country=AT" -H "x-api-key: YOUR_KEY"</pre><p><a href=/bulk><b>Bulk CSV tool</b></a> (paste a list of websites, download a spreadsheet) · ${PRICING()} <a href=/openapi.json>OpenAPI</a> · <a href=/llms.txt>llms.txt</a> · MCP: POST ${origin}/mcp (tool lookup_business)</p>`);
   return J({error:'not found'},404);
 }};
+
+const BULK_HTML=o=>`<h1>Bulk lookup → CSV</h1><p>Paste business website URLs (one per line, up to 500). Each is looked up through the API and you can download a CSV with name, phone, E.164 phone, address, hours, socials and the source URL for each field. Uses your API key's credits (1 per successful row). No key? The first 5 a day are free.</p>
+<p><input id=k placeholder="API key (agf_…), optional" style="width:100%;padding:6px"></p><textarea id=u rows=10 style="width:100%" placeholder="https://www.example-bakery.com"></textarea>
+<p><button id=go>Run</button> <button id=dl disabled>Download CSV</button> <span id=st></span></p><pre id=log style="white-space:pre-wrap;max-height:300px;overflow:auto"></pre>
+<script>
+const F=['name','phone','address','hours','socials','official_site','open_signal'];let rows=[];
+const q=v=>'"'+String(v==null?'':typeof v==='object'?JSON.stringify(v):v).replace(/"/g,'""')+'"';
+go.onclick=async()=>{const list=u.value.split(/\\s+/).filter(Boolean).slice(0,500);rows=[];dl.disabled=true;log.textContent='';
+ for(let i=0;i<list.length;i++){st.textContent=(i+1)+'/'+list.length;const h=k.value.trim()?{'x-api-key':k.value.trim()}:{};
+  const r=await fetch('/v1/lookup?url='+encodeURIComponent(list[i]),{headers:h});const d=await r.json().catch(()=>({error:'bad response'}));
+  if(r.status===402){log.textContent+='Stopped: '+(d.error||'payment required')+'. Buy credits: '+(d.prepaid&&d.prepaid.buy||'')+'\\n';break;}
+  const f=d.fields||{};rows.push([list[i],...F.map(x=>f[x]&&f[x].value),f.phone&&f.phone.e164,...F.map(x=>f[x]&&f[x].source),d.confidence,d.error||d.blocked||'']);
+  log.textContent+=list[i]+' → '+((f.name&&f.name.value)||d.error||d.blocked||'no name')+'\\n';}
+ st.textContent='done: '+rows.length+' rows';dl.disabled=!rows.length;};
+dl.onclick=()=>{const head=['input',...F,'phone_e164',...F.map(x=>x+'_source'),'confidence','note'];const csv=[head,...rows].map(r=>r.map(q).join(',')).join('\\n');
+ const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download='business-facts.csv';a.click();};
+</script>`;
+const PRICING=()=>SUB_LINKS.starter?`Monthly plans: <a href="${SUB_LINKS.starter}">$19/mo for 2,000 lookups</a> · <a href="${SUB_LINKS.pro}">$49/mo for 10,000</a> (cancel anytime) · `:'';
 const LLMS=o=>`# Local Business Facts API (worldwide)
 > Send any business's website URL (any country, any language). Get JSON facts: name, phone (raw + E.164), postal address, opening hours, socials, open/closed signal, page language, country. Each field has source URL, extraction method and confidence. Business info only, no personal data.
 - GET ${o}/v1/lookup?url=<site>&country=<ISO2 optional>  (header x-api-key or Authorization: Bearer)
 - Price: $10 = 500 lookups prepaid: ${PAY_LINK} (key shown after checkout). 1 credit only when facts are found; bot-blocked or failed lookups are free.
+- Monthly: $19/mo = 2,000 lookups (${SUB_LINKS.starter}), $49/mo = 10,000 (${SUB_LINKS.pro}); credits reset each billing month.
+- Bulk CSV tool for humans: ${o}/bulk
 - Free trial: 5 lookups per IP per day with no key. After that, HTTP 402 with the purchase link.
 - GET ${o}/balance · OpenAPI: ${o}/openapi.json · MCP (streamable HTTP): POST ${o}/mcp, tool lookup_business {url, country?}
 `;

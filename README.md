@@ -8,7 +8,7 @@
 curl "https://agentric-facts.agentric.workers.dev/v1/lookup?url=https://www.sacher.com"
 ```
 
-5 free lookups per IP per day, no signup. Need more? **[$10 for 500 lookups](https://buy.stripe.com/14A4gz0CEgg800Cdki0x200)**. Your key shows right after checkout.
+5 free lookups per IP per day, no signup. Need more? **[$10 for 500 lookups](https://buy.stripe.com/14A4gz0CEgg800Cdki0x200)**, or monthly: **[$19/mo for 2,000](https://buy.stripe.com/28EcN599a1le00C6VU0x201)** · **[$49/mo for 10,000](https://buy.stripe.com/6oU14n5WYgg814G9420x202)** (cancel anytime). Not a coder? Paste a list of websites into the [bulk CSV tool](https://agentric-facts.agentric.workers.dev/bulk). Your key shows right after checkout.
 
 Worldwide, any language. Send a business website URL and get source-cited JSON facts: name, phone (raw + E.164), postal address, opening hours, socials, open/closed signal, country, page language. Each field has its source URL, extraction method and confidence. Business information only, no personal data.
 
